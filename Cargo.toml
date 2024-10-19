@@ -1,7 +1,13 @@
 [package]
 name = "cpst"
 version = "1.0.0"
+authors = ["Mantas Pats"]
 edition = "2021"
+
+description = "Command line utility to copy and paste files"
+license = "GPL-3.0"
+repository = "https://github.com/CT3/CopyPasta"
+readme = "README.md"
 
 [dependencies]
 clap = { version = "4.5.20", features = ["derive"] }

@@ -11,4 +11,8 @@ To paste from clipboard into current directory:
 ```
 cpst -p 
 ```
+## Install
 
+```
+cargo install cpst
+```
