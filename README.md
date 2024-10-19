@@ -1,14 +1,14 @@
-# CopyPasta
-Command line utility to make copy pasta easier
+# CoPypaSTa
+Command line utility to make copy pasting easier
 
 ## Usage
 
 To copy a file or folder to clipboard: 
 ```
-cpst cp <file or folder>
+cpst -c <file or folder>
 ```
-To paste from clipboard: 
+To paste from clipboard into current directory: 
 ```
-cpst paste
+cpst -p 
 ```
 
