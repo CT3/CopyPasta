@@ -42,8 +42,8 @@ fn main() -> io::Result<()> {
 
     // Determine the action
     let file = matches.get_one::<String>("copy");
-    let is_move = matches.contains_id("move"); // Check for move first
-    let is_paste = matches.contains_id("paste"); // Check for paste second
+    let is_move = matches.get_flag("move"); // Check for move first
+    let is_paste = matches.get_flag("paste"); // Check for paste second
 
     // Get the path to the user's config directory
     if let Some(config_path) = config_dir() {
