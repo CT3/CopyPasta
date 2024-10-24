@@ -25,17 +25,25 @@ fn main() -> io::Result<()> {
                 .num_args(0) // Replaces `takes_value(false)`
                 .help("Paste the last copied file or folder"),
         )
+        .arg(
+            Arg::new("move")
+                .short('m') // Changed from "paste" to "-p"
+                .long("move")
+                .num_args(0) // Replaces `takes_value(false)`
+                .help("Move the last tagged file or folder"),
+        )
         // Make either `-c` or `-p` required
         .group(
             clap::ArgGroup::new("actions")
-                .args(&["copy", "paste"])
+                .args(&["copy", "paste", "move"])
                 .required(true),
         ) // At least one of them must be provided
         .get_matches();
 
     // Determine the action
     let file = matches.get_one::<String>("copy");
-    let is_paste = matches.contains_id("paste"); // Replaces `is_present`
+    let is_move = matches.contains_id("move"); // Check for move first
+    let is_paste = matches.contains_id("paste"); // Check for paste second
 
     // Get the path to the user's config directory
     if let Some(config_path) = config_dir() {
@@ -55,7 +63,7 @@ fn main() -> io::Result<()> {
                     let mut file_writer = OpenOptions::new()
                         .write(true)
                         .create(true)
-                        .truncate(true) // Append to the file instead of truncating
+                        .truncate(true) // Truncate the file when writing the new path
                         .open(&file_path)?;
 
                     // Save the full path of the file being copied to the config file
@@ -66,6 +74,30 @@ fn main() -> io::Result<()> {
                     eprintln!("Error resolving full path: {}", e);
                     std::process::exit(1);
                 }
+            }
+        } else if is_move {
+            // Read the last saved file path from file_paths.txt
+            let file = File::open(&file_path)?;
+            let reader = BufReader::new(file);
+            let paths: Vec<String> = reader.lines().filter_map(Result::ok).collect();
+
+            if let Some(last_path) = paths.last() {
+                // Attempt to move the file to the current directory
+                let destination =
+                    format!("./{}", last_path.split('/').last().unwrap_or(&last_path));
+                let status = ProcessCommand::new("mv")
+                    .arg(last_path)
+                    .arg(&destination)
+                    .status()?;
+
+                if status.success() {
+                    println!("Moved {} to {}", last_path, destination);
+                } else {
+                    eprintln!("Error: Failed to move the file.");
+                }
+            } else {
+                eprintln!("Error: No valid file path found in {}", file_path.display());
+                eprintln!("Please ensure that the file is not empty and contains valid paths.");
             }
         } else if is_paste {
             // Read the last saved file path from file_paths.txt
@@ -93,7 +125,7 @@ fn main() -> io::Result<()> {
                 eprintln!("Please ensure that the file is not empty and contains valid paths.");
             }
         } else {
-            eprintln!("Error: Invalid action. Use '-c' to copy or '-p' to paste.");
+            eprintln!("Error: Invalid action. Use '-c' to copy, '-p' to paste, or '-m' to move.");
             std::process::exit(1);
         }
     } else {
@@ -103,3 +135,4 @@ fn main() -> io::Result<()> {
 
     Ok(())
 }
+
