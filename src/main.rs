@@ -32,10 +32,17 @@ fn main() -> io::Result<()> {
                 .num_args(0) // Replaces `takes_value(false)`
                 .help("Move the last tagged file or folder"),
         )
+        .arg(
+            Arg::new("info")
+                .short('i') // Changed from "paste" to "-p"
+                .long("info")
+                .num_args(0) // Replaces `takes_value(false)`
+                .help("Show information about the last tagged file or folder"),
+        )
         // Make either `-c` or `-p` required
         .group(
             clap::ArgGroup::new("actions")
-                .args(&["copy", "paste", "move"])
+                .args(&["copy", "paste", "move", "info"])
                 .required(true),
         ) // At least one of them must be provided
         .get_matches();
@@ -44,6 +51,7 @@ fn main() -> io::Result<()> {
     let file = matches.get_one::<String>("copy");
     let is_move = matches.get_flag("move"); // Check for move first
     let is_paste = matches.get_flag("paste"); // Check for paste second
+    let is_info = matches.get_flag("info"); // Check for paste second
 
     // Get the path to the user's config directory
     if let Some(config_path) = config_dir() {
@@ -124,6 +132,19 @@ fn main() -> io::Result<()> {
                 eprintln!("Error: No valid file path found in {}", file_path.display());
                 eprintln!("Please ensure that the file is not empty and contains valid paths.");
             }
+        } else if is_info {
+            // Read the last saved file path from file_paths.txt
+            let file = File::open(&file_path)?;
+            let reader = BufReader::new(file);
+            let paths: Vec<String> = reader.lines().filter_map(Result::ok).collect();
+
+            if let Some(last_path) = paths.last() {
+                // Attempt to move the file to the current directory
+                println!("Path: {}", last_path);
+            } else {
+                eprintln!("Error: No valid file path found in {}", file_path.display());
+                eprintln!("Please ensure that the file is not empty and contains valid paths.");
+            }
         } else {
             eprintln!("Error: Invalid action. Use '-c' to copy, '-p' to paste, or '-m' to move.");
             std::process::exit(1);
@@ -135,4 +156,3 @@ fn main() -> io::Result<()> {
 
     Ok(())
 }
-
