@@ -5,7 +5,7 @@ Command line utility to make copy pasting easier
 
 To copy/tag a file or folder: 
 ```
-cpst -c <file or folder>
+cpst -c <files or folders>
 ```
 To paste tagged files or folder into current directory: 
 ```

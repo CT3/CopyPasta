@@ -1,7 +1,8 @@
-use clap::{Arg, Command};
+use clap::{Arg, Command}; // Removed value_parser
 use dirs::config_dir;
 use std::fs::{canonicalize, create_dir_all, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
+use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 
 fn main() -> io::Result<()> {
@@ -12,46 +13,42 @@ fn main() -> io::Result<()> {
         .about("Copy and paste files")
         .arg(
             Arg::new("copy")
-                .short('c') // Changed from "cp" to "-c"
+                .short('c')
                 .long("copy")
-                .num_args(1) // Replaces `takes_value(true)`
-                .value_name("FILE")
-                .help("File or folder to copy (required when using -c)"),
+                // Accept one or more values
+                .num_args(1..) // Requires at least one argument
+                .value_name("FILE(s)")
+                .help("File(s) or folder(s) to copy"),
         )
         .arg(
             Arg::new("paste")
-                .short('p') // Changed from "paste" to "-p"
+                .short('p')
                 .long("paste")
-                .num_args(0) // Replaces `takes_value(false)`
-                .help("Paste the last copied file or folder"),
+                .num_args(0) // No value expected
+                .help("Paste the last copied file(s) or folder(s) to the current directory"),
         )
         .arg(
             Arg::new("move")
-                .short('m') // Changed from "paste" to "-p"
+                .short('m')
                 .long("move")
-                .num_args(0) // Replaces `takes_value(false)`
-                .help("Move the last tagged file or folder"),
+                .num_args(0) // No value expected
+                .help("Move the last tagged file(s) or folder(s) to the current directory"),
         )
         .arg(
             Arg::new("info")
-                .short('i') // Changed from "paste" to "-p"
+                .short('i')
                 .long("info")
-                .num_args(0) // Replaces `takes_value(false)`
-                .help("Show information about the last tagged file or folder"),
+                .num_args(0) // No value expected
+                .help("Show information about the last tagged file(s) or folder(s)"),
         )
-        // Make either `-c` or `-p` required
+        // Require exactly one action from the group
         .group(
             clap::ArgGroup::new("actions")
                 .args(&["copy", "paste", "move", "info"])
-                .required(true),
-        ) // At least one of them must be provided
+                .required(true)
+                .multiple(false), // Only one action at a time
+        )
         .get_matches();
-
-    // Determine the action
-    let file = matches.get_one::<String>("copy");
-    let is_move = matches.get_flag("move"); // Check for move first
-    let is_paste = matches.get_flag("paste"); // Check for paste second
-    let is_info = matches.get_flag("info"); // Check for paste second
 
     // Get the path to the user's config directory
     if let Some(config_path) = config_dir() {
@@ -61,93 +58,131 @@ fn main() -> io::Result<()> {
 
         create_dir_all(&copypasta_dir)?;
 
-        let mut file_path = copypasta_dir.clone();
-        file_path.push("file_paths.txt");
+        let mut file_path_store = copypasta_dir.clone();
+        file_path_store.push("file_paths.txt");
 
-        if let Some(file_to_copy) = file {
-            // Resolve the full path of the file
-            match canonicalize(file_to_copy) {
-                Ok(full_path) => {
-                    let mut file_writer = OpenOptions::new()
-                        .write(true)
-                        .create(true)
-                        .truncate(true) // Truncate the file when writing the new path
-                        .open(&file_path)?;
+        // Determine the action based on which argument is present
+        if let Some(files_to_copy_iter) = matches.get_many::<String>("copy") {
+            // Handle the copy action
+            let files_to_copy: Vec<&String> = files_to_copy_iter.collect();
 
-                    // Save the full path of the file being copied to the config file
-                    writeln!(file_writer, "{}", full_path.display())?;
-                    println!("Copied: {}", full_path.display());
-                }
-                Err(e) => {
-                    eprintln!("Error resolving full path: {}", e);
-                    std::process::exit(1);
+            if files_to_copy.is_empty() {
+                 eprintln!("Error: No file(s) provided for copy.");
+                 std::process::exit(1);
+            }
+
+            let mut file_writer = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true) // Truncate the file when writing the new path(s)
+                .open(&file_path_store)?;
+
+            let mut copied_paths = Vec::new();
+
+            for file_to_copy in files_to_copy {
+                // Resolve the full path of the file
+                match canonicalize(file_to_copy) {
+                    Ok(full_path) => {
+                        // Save the full path of the file being copied to the config file
+                        writeln!(file_writer, "{}", full_path.display())?;
+                        copied_paths.push(full_path);
+                    }
+                    Err(e) => {
+                        eprintln!("Error resolving full path for {}: {}", file_to_copy, e);
+                        // Decide if you want to continue or exit on error
+                        // For now, we'll print the error and continue with other files
+                    }
                 }
             }
-        } else if is_move {
-            // Read the last saved file path from file_paths.txt
-            let file = File::open(&file_path)?;
-            let reader = BufReader::new(file);
-            let paths: Vec<String> = reader.lines().filter_map(Result::ok).collect();
 
-            if let Some(last_path) = paths.last() {
-                // Attempt to move the file to the current directory
-                let destination =
-                    format!("./{}", last_path.split('/').last().unwrap_or(&last_path));
-                let status = ProcessCommand::new("mv")
-                    .arg(last_path)
-                    .arg(&destination)
-                    .status()?;
-
-                if status.success() {
-                    println!("Moved {} to {}", last_path, destination);
-                } else {
-                    eprintln!("Error: Failed to move the file.");
-                }
+            if !copied_paths.is_empty() {
+                 println!("Copied paths:");
+                 for path in copied_paths {
+                     println!("{}", path.display());
+                 }
             } else {
-                eprintln!("Error: No valid file path found in {}", file_path.display());
-                eprintln!("Please ensure that the file is not empty and contains valid paths.");
+                 eprintln!("Error: No valid paths were copied.");
+                 std::process::exit(1);
             }
-        } else if is_paste {
-            // Read the last saved file path from file_paths.txt
-            let file = File::open(&file_path)?;
-            let reader = BufReader::new(file);
-            let paths: Vec<String> = reader.lines().filter_map(Result::ok).collect();
 
-            if let Some(last_path) = paths.last() {
-                // Attempt to copy the file to the current directory
-                let destination =
-                    format!("./{}", last_path.split('/').last().unwrap_or(&last_path));
-                let status = ProcessCommand::new("cp")
-                    .arg("-r")
-                    .arg(last_path)
-                    .arg(&destination)
-                    .status()?;
 
-                if status.success() {
-                    println!("Pasted {} to {}", last_path, destination);
-                } else {
-                    eprintln!("Error: Failed to paste the file.");
-                }
-            } else {
-                eprintln!("Error: No valid file path found in {}", file_path.display());
-                eprintln!("Please ensure that the file is not empty and contains valid paths.");
-            }
-        } else if is_info {
-            // Read the last saved file path from file_paths.txt
-            let file = File::open(&file_path)?;
-            let reader = BufReader::new(file);
-            let paths: Vec<String> = reader.lines().filter_map(Result::ok).collect();
-
-            if let Some(last_path) = paths.last() {
-                // Attempt to move the file to the current directory
-                println!("Path: {}", last_path);
-            } else {
-                eprintln!("Error: No valid file path found in {}", file_path.display());
-                eprintln!("Please ensure that the file is not empty and contains valid paths.");
-            }
         } else {
-            eprintln!("Error: Invalid action. Use '-c' to copy, '-p' to paste, or '-m' to move.");
-            std::process::exit(1);
+            // Actions that require reading from the file_path_store
+            let file = File::open(&file_path_store)?;
+            let reader = BufReader::new(file);
+            let paths_to_act_on: Vec<PathBuf> = reader
+                .lines()
+                .filter_map(Result::ok)
+                .map(PathBuf::from) // Convert String to PathBuf
+                .collect();
+
+            if paths_to_act_on.is_empty() {
+                eprintln!("Error: No file path(s) found in {}", file_path_store.display());
+                eprintln!("Please use the '-c' option first to copy file(s).");
+                std::process::exit(1);
+            }
+
+            if matches.get_flag("move") {
+                // Handle the move action for all paths
+                println!("Moving files:");
+                for last_path in paths_to_act_on {
+                    if let Some(file_name) = last_path.file_name() {
+                         let destination = std::env::current_dir()?.join(file_name);
+
+                         let status = ProcessCommand::new("mv")
+                             .arg(&last_path)
+                             .arg(&destination)
+                             .status()?;
+
+                         if status.success() {
+                             println!("Moved {} to {}", last_path.display(), destination.display());
+                         } else {
+                             eprintln!(
+                                 "Error: Failed to move {}. Status: {:?}",
+                                 last_path.display(),
+                                 status
+                             );
+                         }
+                    } else {
+                         eprintln!("Error: Could not get filename for {}", last_path.display());
+                    }
+                }
+
+            } else if matches.get_flag("paste") {
+                // Handle the paste action for all paths
+                println!("Pasting files:");
+                for last_path in paths_to_act_on {
+                     if let Some(file_name) = last_path.file_name() {
+                         let destination = std::env::current_dir()?.join(file_name);
+
+                         // Use -r for recursive copy in case of directories
+                         let status = ProcessCommand::new("cp")
+                             .arg("-r")
+                             .arg(&last_path)
+                             .arg(&destination)
+                             .status()?;
+
+                         if status.success() {
+                             println!("Pasted {} to {}", last_path.display(), destination.display());
+                         } else {
+                             eprintln!(
+                                 "Error: Failed to paste {}. Status: {:?}",
+                                 last_path.display(),
+                                 status
+                             );
+                         }
+                     } else {
+                         eprintln!("Error: Could not get filename for {}", last_path.display());
+                     }
+                }
+
+            } else if matches.get_flag("info") {
+                // Handle the info action for all paths
+                println!("Information about copied paths:");
+                for path in paths_to_act_on {
+                    println!("{}", path.display());
+                }
+            }
         }
     } else {
         eprintln!("Error: Could not find the user's config directory.");
