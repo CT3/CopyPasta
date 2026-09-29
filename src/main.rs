@@ -300,8 +300,8 @@ impl Progress {
     }
 }
 
-/// Count the files and bytes under `src`. Unreadable entries are ignored
-/// here; the copy itself reports them.
+/// Count the regular files and bytes under `src`. Unreadable entries are
+/// ignored here; the copy itself reports them.
 fn tally(src: &Path, files: &mut u64, bytes: &mut u64) {
     if src.is_dir() {
         let Ok(entries) = fs::read_dir(src) else {
@@ -311,32 +311,75 @@ fn tally(src: &Path, files: &mut u64, bytes: &mut u64) {
             tally(&entry.path(), files, bytes);
         }
     } else if let Ok(metadata) = fs::metadata(src) {
-        *files += 1;
-        *bytes += metadata.len();
+        if metadata.is_file() {
+            *files += 1;
+            *bytes += metadata.len();
+        }
     }
 }
 
-/// Recursively copy a file or directory tree from `src` to `dst`.
+/// Recursively copy a file or directory tree from `src` to `dst`. Inside a
+/// directory, a failed entry is reported and skipped rather than aborting the
+/// rest of the tree; the result is still an error if anything failed, so a
+/// move keeps its source.
 fn copy_recursively(src: &Path, dst: &Path, progress: &mut Progress) -> io::Result<()> {
-    if src.is_dir() {
-        create_dir_all(dst)?;
-        for entry in fs::read_dir(src)? {
-            let entry = entry?;
-            copy_recursively(&entry.path(), &dst.join(entry.file_name()), progress)?;
-        }
-        Ok(())
-    } else {
-        if let Some(parent) = dst.parent() {
-            create_dir_all(parent)?;
-        }
-        copy_file(src, dst, progress)
+    if !src.is_dir() {
+        return copy_file(src, dst, progress);
+    }
+
+    match copy_tree(src, dst, progress) {
+        0 => Ok(()),
+        failed => Err(io::Error::other(format!(
+            "{} item(s) could not be copied",
+            failed
+        ))),
     }
 }
 
-fn copy_file(src: &Path, dst: &Path, progress: &mut Progress) -> io::Result<()> {
-    progress.start_file(src);
+/// Copy `src` to `dst`, reporting each failure and returning how many there were.
+fn copy_tree(src: &Path, dst: &Path, progress: &mut Progress) -> u64 {
+    let report = |progress: &Progress, path: &Path, e: io::Error| {
+        progress.eprintln(format!("Error: Failed to copy {}: {}", path.display(), e));
+        1
+    };
 
-    let len = fs::metadata(src)?.len();
+    if !src.is_dir() {
+        return match copy_file(src, dst, progress) {
+            Ok(()) => 0,
+            Err(e) => report(progress, src, e),
+        };
+    }
+
+    let entries = match create_dir_all(dst).and_then(|()| fs::read_dir(src)) {
+        Ok(entries) => entries,
+        Err(e) => return report(progress, src, e),
+    };
+
+    let mut failed = 0;
+    for entry in entries {
+        failed += match entry {
+            Ok(entry) => copy_tree(&entry.path(), &dst.join(entry.file_name()), progress),
+            Err(e) => report(progress, src, e),
+        };
+    }
+    failed
+}
+
+/// Copy one regular file. Sockets, FIFOs and devices (e.g. git's
+/// `fsmonitor--daemon.ipc`) can't be copied as files, so they are skipped.
+fn copy_file(src: &Path, dst: &Path, progress: &mut Progress) -> io::Result<()> {
+    let metadata = fs::metadata(src)?;
+    if !metadata.is_file() {
+        progress.eprintln(format!("Skipping {}: not a regular file", src.display()));
+        return Ok(());
+    }
+
+    if let Some(parent) = dst.parent() {
+        create_dir_all(parent)?;
+    }
+
+    progress.start_file(src);
+    let len = metadata.len();
     if len < STREAM_THRESHOLD {
         fs::copy(src, dst)?;
         progress.bar.inc(len);
