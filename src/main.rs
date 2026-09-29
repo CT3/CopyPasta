@@ -1,5 +1,6 @@
 use clap::{Arg, ArgGroup, Command};
 use dirs::config_dir;
+use indicatif::{ProgressBar, ProgressStyle};
 use std::fs::{self, canonicalize, create_dir_all, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -132,32 +133,55 @@ fn read_store(store: &Path) -> io::Result<Vec<PathBuf>> {
 fn do_move(paths: &[PathBuf]) -> io::Result<()> {
     let current_dir = std::env::current_dir()?;
     println!("Moving files:");
-    for src in paths {
-        let Some(destination) = destination_for(src, &current_dir) else {
-            continue;
-        };
 
-        match move_path(src, &destination) {
-            Ok(()) => println!("Moved {} to {}", src.display(), destination.display()),
-            Err(e) => eprintln!("Error: Failed to move {}: {}", src.display(), e),
+    // Renames are instant, so only the ones that fail (e.g. across
+    // filesystems, where `rename` returns `EXDEV`) fall back to a copy with
+    // a progress bar, followed by removing the source.
+    let mut pending = Vec::new();
+    for (src, destination) in jobs(paths, &current_dir) {
+        if fs::rename(src, &destination).is_ok() {
+            println!("Moved {} to {}", src.display(), destination.display());
+        } else {
+            pending.push((src, destination));
         }
     }
+
+    if pending.is_empty() {
+        return Ok(());
+    }
+
+    let mut progress = Progress::new(pending.iter().map(|(src, _)| *src));
+    for (src, destination) in &pending {
+        match copy_recursively(src, destination, &mut progress).and_then(|()| remove_path(src)) {
+            Ok(()) => progress.println(format!(
+                "Moved {} to {}",
+                src.display(),
+                destination.display()
+            )),
+            Err(e) => progress.eprintln(format!("Error: Failed to move {}: {}", src.display(), e)),
+        }
+    }
+    progress.finish();
     Ok(())
 }
 
 fn do_paste(paths: &[PathBuf]) -> io::Result<()> {
     let current_dir = std::env::current_dir()?;
     println!("Pasting files:");
-    for src in paths {
-        let Some(destination) = destination_for(src, &current_dir) else {
-            continue;
-        };
 
-        match copy_recursively(src, &destination) {
-            Ok(()) => println!("Pasted {} to {}", src.display(), destination.display()),
-            Err(e) => eprintln!("Error: Failed to paste {}: {}", src.display(), e),
+    let jobs = jobs(paths, &current_dir);
+    let mut progress = Progress::new(jobs.iter().map(|(src, _)| *src));
+    for (src, destination) in &jobs {
+        match copy_recursively(src, destination, &mut progress) {
+            Ok(()) => progress.println(format!(
+                "Pasted {} to {}",
+                src.display(),
+                destination.display()
+            )),
+            Err(e) => progress.eprintln(format!("Error: Failed to paste {}: {}", src.display(), e)),
         }
     }
+    progress.finish();
     Ok(())
 }
 
@@ -188,14 +212,16 @@ fn destination_for(src: &Path, current_dir: &Path) -> Option<PathBuf> {
     Some(destination)
 }
 
-/// Move `src` to `dst`, falling back to copy-then-remove when a plain rename
-/// fails (e.g. across filesystems, where `rename` returns `EXDEV`).
-fn move_path(src: &Path, dst: &Path) -> io::Result<()> {
-    if fs::rename(src, dst).is_ok() {
-        return Ok(());
-    }
+/// Pair each source with its destination in `current_dir`, dropping the
+/// ones `destination_for` skips.
+fn jobs<'a>(paths: &'a [PathBuf], current_dir: &Path) -> Vec<(&'a Path, PathBuf)> {
+    paths
+        .iter()
+        .filter_map(|src| destination_for(src, current_dir).map(|dst| (src.as_path(), dst)))
+        .collect()
+}
 
-    copy_recursively(src, dst)?;
+fn remove_path(src: &Path) -> io::Result<()> {
     if src.is_dir() {
         fs::remove_dir_all(src)
     } else {
@@ -203,19 +229,126 @@ fn move_path(src: &Path, dst: &Path) -> io::Result<()> {
     }
 }
 
+/// Files below this size are copied with `fs::copy` (which can use
+/// copy-on-write clones); larger ones are streamed so the bar moves.
+const STREAM_THRESHOLD: u64 = 4 * 1024 * 1024;
+
+/// Progress over a whole paste/move: a byte-based bar, prefixed with the
+/// number of files copied out of the total. Drawn on stderr and hidden
+/// automatically when it isn't a terminal.
+struct Progress {
+    bar: ProgressBar,
+    files_done: u64,
+    files_total: u64,
+}
+
+impl Progress {
+    /// Walk the sources up front to learn the total file count and size.
+    fn new<'a>(sources: impl Iterator<Item = &'a Path>) -> Self {
+        let (mut files_total, mut bytes_total) = (0, 0);
+        for src in sources {
+            tally(src, &mut files_total, &mut bytes_total);
+        }
+
+        let bar = ProgressBar::new(bytes_total);
+        bar.set_style(
+            ProgressStyle::with_template(
+                "{prefix} files [{bar:30.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta}) {wide_msg}",
+            )
+            .expect("valid progress template")
+            .progress_chars("=> "),
+        );
+
+        let progress = Progress {
+            bar,
+            files_done: 0,
+            files_total,
+        };
+        progress.update_prefix();
+        progress
+    }
+
+    fn update_prefix(&self) {
+        self.bar
+            .set_prefix(format!("{}/{}", self.files_done, self.files_total));
+    }
+
+    fn start_file(&self, src: &Path) {
+        let name = src.file_name().unwrap_or(src.as_os_str());
+        self.bar.set_message(name.to_string_lossy().into_owned());
+    }
+
+    fn finish_file(&mut self) {
+        self.files_done += 1;
+        self.update_prefix();
+    }
+
+    /// Print above the bar, or plainly when the bar is hidden.
+    fn println(&self, line: String) {
+        self.bar.suspend(|| println!("{}", line));
+    }
+
+    fn eprintln(&self, line: String) {
+        self.bar.suspend(|| eprintln!("{}", line));
+    }
+
+    fn finish(&self) {
+        self.bar.finish_and_clear();
+        if self.files_total > 0 {
+            println!("Copied {}/{} files.", self.files_done, self.files_total);
+        }
+    }
+}
+
+/// Count the files and bytes under `src`. Unreadable entries are ignored
+/// here; the copy itself reports them.
+fn tally(src: &Path, files: &mut u64, bytes: &mut u64) {
+    if src.is_dir() {
+        let Ok(entries) = fs::read_dir(src) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            tally(&entry.path(), files, bytes);
+        }
+    } else if let Ok(metadata) = fs::metadata(src) {
+        *files += 1;
+        *bytes += metadata.len();
+    }
+}
+
 /// Recursively copy a file or directory tree from `src` to `dst`.
-fn copy_recursively(src: &Path, dst: &Path) -> io::Result<()> {
+fn copy_recursively(src: &Path, dst: &Path, progress: &mut Progress) -> io::Result<()> {
     if src.is_dir() {
         create_dir_all(dst)?;
         for entry in fs::read_dir(src)? {
             let entry = entry?;
-            copy_recursively(&entry.path(), &dst.join(entry.file_name()))?;
+            copy_recursively(&entry.path(), &dst.join(entry.file_name()), progress)?;
         }
         Ok(())
     } else {
         if let Some(parent) = dst.parent() {
             create_dir_all(parent)?;
         }
-        fs::copy(src, dst).map(|_| ())
+        copy_file(src, dst, progress)
     }
+}
+
+fn copy_file(src: &Path, dst: &Path, progress: &mut Progress) -> io::Result<()> {
+    progress.start_file(src);
+
+    let len = fs::metadata(src)?.len();
+    if len < STREAM_THRESHOLD {
+        fs::copy(src, dst)?;
+        progress.bar.inc(len);
+    } else {
+        let reader = File::open(src)?;
+        let permissions = reader.metadata()?.permissions();
+        let mut reader = BufReader::with_capacity(1024 * 1024, reader);
+        let mut writer = progress.bar.wrap_write(File::create(dst)?);
+        io::copy(&mut reader, &mut writer)?;
+        fs::set_permissions(dst, permissions)?;
+    }
+
+    progress.finish_file();
+    Ok(())
 }
